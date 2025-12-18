@@ -58,9 +58,6 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-// Only use HTTPS redirection if HTTPS is configured
-// app.UseHttpsRedirection();
-
 app.MapControllers();
 
 // Simple root endpoint

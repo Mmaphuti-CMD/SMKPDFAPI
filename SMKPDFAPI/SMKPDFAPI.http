@@ -1,6 +1,0 @@
-@SMKPDFAPI_HostAddress = http://localhost:5189
-
-GET {{SMKPDFAPI_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

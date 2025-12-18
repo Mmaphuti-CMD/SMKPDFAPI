@@ -395,3 +395,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# HTTP client files (Visual Studio/Rider)
+*.http
