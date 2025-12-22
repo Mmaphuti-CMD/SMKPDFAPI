@@ -14,6 +14,10 @@ builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = 20_000
 builder.Services.AddScoped<IPdfTextExtractor, PdfPigTextExtractor>();
 builder.Services.AddScoped<IStatementNormalizer, SimpleStatementNormalizer>();
 builder.Services.AddScoped<ITransactionParser, RegexTransactionParser>();
+builder.Services.AddScoped<IIssuerExtractor, BankIssuerExtractor>();
+builder.Services.AddScoped<IDuplicateDetector, TransactionDuplicateDetector>();
+builder.Services.AddScoped<IAccountInfoExtractor, BankAccountInfoExtractor>();
+builder.Services.AddScoped<IStatementMetadataExtractor, BankStatementMetadataExtractor>();
 
 // Swagger/OpenAPI
 builder.Services.AddEndpointsApiExplorer();
