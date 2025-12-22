@@ -54,7 +54,7 @@ public class RegexTransactionParser : ITransactionParser
                 (line.Contains("Date", StringComparison.OrdinalIgnoreCase) && 
                  (line.Contains("Description", StringComparison.OrdinalIgnoreCase) ||
                   line.Contains("Money", StringComparison.OrdinalIgnoreCase))))
-            {
+        {
                 foundHeader = true;
                 continue;
             }
