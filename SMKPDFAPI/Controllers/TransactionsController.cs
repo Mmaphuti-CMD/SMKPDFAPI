@@ -89,6 +89,7 @@ public class TransactionsController : ControllerBase
         var duplicateReport = _duplicateDetector.GetDuplicateReport(transactions);
 
         // Extract account information (use unique transactions for calculations)
+        // Note: uniqueTransactions is already List<Transaction>, so we can use it directly
         var accountInfo = _accountInfoExtractor.ExtractAccountInfo(normalized, uniqueTransactions);
 
         // Extract statement metadata (pass page count from PDF)
@@ -144,8 +145,16 @@ public class TransactionsController : ControllerBase
                     missingTransactionCheck = transactions.Any(t => 
                         t.Date.ToString("dd/MM/yyyy") == "16/12/2025" && 
                         t.Description.Contains("PayShap", StringComparison.OrdinalIgnoreCase) &&
-                        t.Amount == -100.00m) ? "FOUND in parsed transactions" : "NOT FOUND in parsed transactions",
-                    transactionsOn16Dec = transactions.Where(t => t.Date.ToString("dd/MM/yyyy") == "16/12/2025").Select(t => new { t.Description, t.Amount, t.Fee }).ToList()
+                        Math.Abs(t.Amount - (-100.00m)) < 0.01m) ? "FOUND in parsed transactions" : "NOT FOUND in parsed transactions",
+                    transactionsOn16Dec = transactions.Where(t => t.Date.ToString("dd/MM/yyyy") == "16/12/2025").Select(t => new { t.Description, t.Amount, t.Fee, t.Category }).ToList(),
+                    // Check transactions with fees
+                    transactionsWithFees = transactions.Where(t => t.Fee.HasValue && t.Fee.Value > 0).Select(t => new { t.Date, t.Description, t.Amount, t.Fee }).ToList(),
+                    transactionsWithoutFeesButShouldHave = transactions.Where(t => 
+                        !t.Fee.HasValue && 
+                        (t.Description.Contains("PayShap", StringComparison.OrdinalIgnoreCase) ||
+                         t.Description.Contains("Payment", StringComparison.OrdinalIgnoreCase) ||
+                         t.Description.Contains("Purchase", StringComparison.OrdinalIgnoreCase)) &&
+                        t.Amount < 0).Select(t => new { t.Date, t.Description, t.Amount }).ToList()
                 }
             });
         }

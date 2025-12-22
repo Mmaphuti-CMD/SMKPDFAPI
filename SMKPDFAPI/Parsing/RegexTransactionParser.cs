@@ -6,12 +6,14 @@ namespace SMKPDFAPI.Parsing;
 
 public class RegexTransactionParser : ITransactionParser
 {
-    // Pattern for bank statement format: Date Description [Category] [Money In] [Money Out] [Fee] Balance
+    // Pattern for bank statement format: Date | Description | Category | Money In | Money Out | Fee* | Balance
+    // Column order: Date | Description | Category | Money In | Money Out | Fee* | Balance
     // Examples:
-    // "01/11/2025 Payment Received: M Madiope Other Income 200.00 238.04"
-    // "01/11/2025 Banking App External Payment: King Rental Income -195.00 -2.00 41.04"
-    // "01/11/2025 Live Better Interest Sweep Transfer -0.16 91.50"
-    // "08/12/2025 Rana General Trading P Witbank (Card 7938) Furniture & Appliances -1 000.00 520.06"
+    // "01/11/2025 Payment Received: M Madiope Other Income 200.00 238.04" (Money In, Balance)
+    // "01/11/2025 Banking App External Payment: King Rental Income -195.00 -2.00 41.04" (Money Out, Fee, Balance)
+    // "01/11/2025 Live Better Interest Sweep Transfer -0.16 91.50" (Money Out, Balance)
+    // "16/12/2025 Banking App External PayShap Payment: King Digital Payments -100.00 -6.00 43.56" (Money Out, Fee, Balance)
+    // "08/12/2025 Rana General Trading P Witbank (Card 7938) Furniture & Appliances -1 000.00 520.06" (Money Out, Balance)
     private static readonly Regex LinePattern = new(
         @"^(?<date>\d{2}/\d{2}/\d{4})\s*(?<rest>.+)$",
         RegexOptions.Compiled);
@@ -66,28 +68,92 @@ public class RegexTransactionParser : ITransactionParser
                 foundHeader = true; // Assume header was skipped/missing, proceed anyway
             }
 
-            // Skip other header/footer lines
-            if (line.Contains("Includes VAT", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Page", StringComparison.OrdinalIgnoreCase) && line.Contains("of", StringComparison.OrdinalIgnoreCase) ||
-                string.IsNullOrWhiteSpace(line))
+            // Skip empty lines
+            if (string.IsNullOrWhiteSpace(line))
             {
                 continue;
+            }
+
+            // Check if line starts with a date pattern FIRST - this takes priority
+            // This ensures we process transaction lines even if they appear in unexpected places
+            var match = LinePattern.Match(line);
+            bool isTransactionLine = match.Success;
+
+            // Skip header/footer lines, but ONLY if they don't start with a date
+            // This ensures transaction lines are never skipped
+            if (!isTransactionLine)
+            {
+                if (line.Contains("Includes VAT", StringComparison.OrdinalIgnoreCase) ||
+                    (line.Contains("Page", StringComparison.OrdinalIgnoreCase) && line.Contains("of", StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
             }
 
             // Only process lines after we've found the transaction history header
+            // BUT: if a line starts with a date, process it anyway (might be a transaction)
             if (!inTransactionHistory || !foundHeader)
             {
-                continue;
+                // If line starts with date, assume we're in transaction section
+                if (isTransactionLine)
+                {
+                    inTransactionHistory = true;
+                    foundHeader = true; // Assume header was found
+                }
+                else
+                {
+                    continue;
+                }
             }
 
-            var match = LinePattern.Match(line);
-            if (!match.Success)
+            // If line doesn't match date pattern, skip it
+            if (!isTransactionLine)
             {
                 continue;
             }
 
             var dateStr = match.Groups["date"].Value;
-            var restOfLine = match.Groups["rest"].Value;
+            var restOfLine = match.Groups["rest"].Value.Trim();
+            
+            // Defensive check: ensure restOfLine is not empty
+            if (string.IsNullOrWhiteSpace(restOfLine))
+            {
+                continue; // Skip lines with only a date
+            }
+            
+            // MULTI-LINE TRANSACTION HANDLING: Merge continuation lines
+            // If the next line doesn't start with a date and the current line doesn't have enough monetary values,
+            // it might be a continuation of the description
+            while (i + 1 < text.Lines.Count)
+            {
+                var nextLine = text.Lines[i + 1].Trim();
+                
+                // If next line starts with a date, it's a new transaction
+                if (LinePattern.IsMatch(nextLine))
+                {
+                    break;
+                }
+                
+                // If next line is empty or a header/footer, stop merging
+                if (string.IsNullOrWhiteSpace(nextLine) ||
+                    nextLine.Contains("Includes VAT", StringComparison.OrdinalIgnoreCase) ||
+                    (nextLine.Contains("Page", StringComparison.OrdinalIgnoreCase) && nextLine.Contains("of", StringComparison.OrdinalIgnoreCase)))
+                {
+                    break;
+                }
+                
+                // Check if current line has enough monetary values (at least 2: amount + balance)
+                var currentMoneyMatches = MoneyPattern.Matches(restOfLine);
+                if (currentMoneyMatches.Count >= 2)
+                {
+                    // Current line already has amount and balance, so it's complete
+                    break;
+                }
+                
+                // Merge the next line into the current line
+                restOfLine = restOfLine + " " + nextLine;
+                i++; // Skip the merged line
+            }
 
             // Find all monetary values in the line
             var moneyMatches = MoneyPattern.Matches(restOfLine);
@@ -101,183 +167,91 @@ public class RegexTransactionParser : ITransactionParser
             var balanceStr = balanceMatch.Value.Replace(" ", ""); // Remove spaces from "1 000.00"
             var balance = decimal.Parse(balanceStr, NumberStyles.Any, CultureInfo.InvariantCulture);
 
-            // Find the transaction amount (Money In or Money Out)
-            // Look through all amounts except the last one (balance)
+            // Find the transaction amount (Money In or Money Out) and fee
+            // Column order: Date | Description | Category | Money In | Money Out | Fee* | Balance
+            // Pattern: [Money In OR Money Out] [Fee?] [Balance]
+            // Examples:
+            //   "-100.00 -6.00 43.56" (Money Out, Fee, Balance) - 3 values
+            //   "-195.00 -2.00 41.04" (Money Out, Fee, Balance) - 3 values
+            //   "200.00 238.04" (Money In, Balance) - 2 values (no fee)
+            //   "-0.16 91.50" (Money Out, Balance) - 2 values (no fee)
+            
             decimal amount = 0;
             decimal? fee = null;
             
-            if (moneyMatches.Count > 1)
+            if (moneyMatches.Count >= 3)
             {
-                // IMPROVED LOGIC: Handle transactions with fees more accurately
-                // Pattern: [Amount] [Fee?] [Balance]
-                // Examples:
-                //   "-100.00 -6.00 43.56" (amount, fee, balance) - 3 values
-                //   "-195.00 -2.00 41.04" (amount, fee, balance) - 3 values
-                //   "200.00 238.04" (amount, balance) - 2 values
+                // We have 3+ values: [Money In OR Money Out] [Fee?] [Balance]
+                // Column structure: Money In/Money Out | Fee* | Balance
+                // Parse all monetary values (excluding balance which is always last)
+                var moneyInOrOutStr = moneyMatches[0].Value.Replace(" ", "");
+                amount = decimal.Parse(moneyInOrOutStr, NumberStyles.Any, CultureInfo.InvariantCulture);
                 
-                if (moneyMatches.Count >= 3)
+                // Check all values between first and last (excluding balance) to find the fee
+                // Fee is typically the second-to-last value, but verify it's actually a fee
+                for (int j = 1; j < moneyMatches.Count - 1; j++) // Skip first (amount) and last (balance)
                 {
-                    // We have 3+ values: likely [Amount] [Fee] [Balance]
-                    // The transaction amount is typically the first value (larger absolute value)
-                    // The fee is typically the second-to-last (smaller, negative value)
+                    var potentialFeeStr = moneyMatches[j].Value.Replace(" ", "");
+                    var potentialFeeValue = decimal.Parse(potentialFeeStr, NumberStyles.Any, CultureInfo.InvariantCulture);
                     
-                    var firstAmountStr = moneyMatches[0].Value.Replace(" ", "");
-                    var firstAmount = decimal.Parse(firstAmountStr, NumberStyles.Any, CultureInfo.InvariantCulture);
-                    
-                    var secondAmountStr = moneyMatches[moneyMatches.Count - 2].Value.Replace(" ", "");
-                    var secondAmount = decimal.Parse(secondAmountStr, NumberStyles.Any, CultureInfo.InvariantCulture);
-                    
-                    // Determine which is the transaction amount and which is the fee
-                    // Transaction amount is typically larger in absolute value
-                    if (Math.Abs(firstAmount) >= Math.Abs(secondAmount))
+                    // Fee characteristics:
+                    // 1. Always negative
+                    // 2. Small absolute value (< 100, typically < 10)
+                    // 3. Not zero
+                    if (potentialFeeValue < 0 && Math.Abs(potentialFeeValue) < 100 && Math.Abs(potentialFeeValue) > 0.01m)
                     {
-                        // First is transaction amount, second is fee
-                        amount = firstAmount;
-                        // Fee is typically negative and small
-                        if (secondAmount < 0 && Math.Abs(secondAmount) < 1000)
-                        {
-                            fee = Math.Abs(secondAmount);
-                        }
-                    }
-                    else
-                    {
-                        // Second is transaction amount, first might be fee or part of description
-                        amount = secondAmount;
-                        if (firstAmount < 0 && Math.Abs(firstAmount) < 1000)
-                        {
-                            fee = Math.Abs(firstAmount);
-                        }
+                        fee = Math.Abs(potentialFeeValue); // Store fee as positive value
+                        break; // Found the fee, stop looking
                     }
                 }
-                else if (moneyMatches.Count == 2)
-                {
-                    // Two values: [Amount] [Balance]
-                    var amountStr = moneyMatches[0].Value.Replace(" ", "");
-                    amount = decimal.Parse(amountStr, NumberStyles.Any, CultureInfo.InvariantCulture);
-                }
-                
-                // Fallback: If amount is still 0, try to find any non-zero amount
-                if (amount == 0)
-                {
-                    for (int j = 0; j < moneyMatches.Count - 1; j++)
-                    {
-                        var amountStr = moneyMatches[j].Value.Replace(" ", "");
-                        var amountValue = decimal.Parse(amountStr, NumberStyles.Any, CultureInfo.InvariantCulture);
-                        
-                        if (amountValue != 0)
-                        {
-                            amount = amountValue;
-                            break;
-                        }
-                    }
-                }
+            }
+            else if (moneyMatches.Count == 2)
+            {
+                // Two values: [Money In OR Money Out] [Balance] (no fee)
+                // Column structure: Money In/Money Out | Balance
+                var amountStr = moneyMatches[0].Value.Replace(" ", "");
+                amount = decimal.Parse(amountStr, NumberStyles.Any, CultureInfo.InvariantCulture);
+                // No fee in this case
             }
             else if (moneyMatches.Count == 1)
             {
                 // Only balance found, no transaction amount
-                // This could be:
-                // 1. An incomplete transaction line (like "02/12/2025 Insf. Funds Distrokid Musician New")
-                // 2. A continuation line from a multi-line transaction
-                // Check if this might be a continuation - if so, try to merge with previous line
-                if (i > 0 && results.Count > 0)
-                {
-                    // Check if previous transaction might be incomplete
-                    var prevTransaction = results[results.Count - 1];
-                    // If previous transaction description is very short or ends with incomplete word,
-                    // this might be a continuation
-                    if (prevTransaction.Description.Length < 30 || 
-                        prevTransaction.Description.EndsWith("New", StringComparison.OrdinalIgnoreCase) ||
-                        prevTransaction.Description.EndsWith("Us", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // This might be a continuation - skip for now (will be handled by multi-line logic)
-                        continue;
-                    }
-                }
-                // Skip incomplete lines
+                // This is an incomplete transaction line - skip it
                 continue;
             }
 
-            // Extract description - everything before the transaction amount
-            // CRITICAL FIX: Use the actual transaction amount we determined, not a guess based on position
-            // Find the position of the transaction amount in the line
-            string? transactionAmountStr = null;
-            int transactionAmountIndex = -1;
+            // Extract description and category
+            // Column structure: Date | Description | Category | Money In | Money Out | Fee* | Balance
+            // Strategy: Use regex to extract everything before the first monetary value pattern
+            // This is more reliable than string index operations
             
-            // Find which monetary value matches our determined amount
-            // Try to find the transaction amount in the line
-            for (int j = 0; j < moneyMatches.Count - 1; j++) // Exclude balance (last one)
-            {
-                var matchStr = moneyMatches[j].Value.Replace(" ", "");
-                var matchValue = decimal.Parse(matchStr, NumberStyles.Any, CultureInfo.InvariantCulture);
-                
-                // Check if this matches our determined amount (with small tolerance for rounding)
-                if (Math.Abs(matchValue - amount) < 0.01m)
-                {
-                    transactionAmountStr = moneyMatches[j].Value; // Keep original with spaces if any
-                    // Try LastIndexOf first (in case amount appears multiple times)
-                    transactionAmountIndex = restOfLine.LastIndexOf(transactionAmountStr, StringComparison.Ordinal);
-                    
-                    // If LastIndexOf fails, try IndexOf
-                    if (transactionAmountIndex < 0)
-                    {
-                        transactionAmountIndex = restOfLine.IndexOf(transactionAmountStr, StringComparison.Ordinal);
-                    }
-                    
-                    // If still not found, try without spaces
-                    if (transactionAmountIndex < 0)
-                    {
-                        var amountWithoutSpaces = amount.ToString("F2", CultureInfo.InvariantCulture);
-                        if (amount < 0) amountWithoutSpaces = "-" + amountWithoutSpaces.TrimStart('-');
-                        transactionAmountIndex = restOfLine.IndexOf(amountWithoutSpaces, StringComparison.Ordinal);
-                    }
-                    
-                    if (transactionAmountIndex >= 0)
-                    {
-                        break; // Found it!
-                    }
-                }
-            }
-            
-            // Fallback: if we couldn't find the exact amount, use the first monetary value (transaction amount)
-            if (transactionAmountIndex < 0 && moneyMatches.Count > 1)
-            {
-                transactionAmountStr = moneyMatches[0].Value;
-                transactionAmountIndex = restOfLine.IndexOf(transactionAmountStr, StringComparison.Ordinal);
-                
-                // If still not found, try without spaces
-                if (transactionAmountIndex < 0)
-                {
-                    var firstAmountStr = moneyMatches[0].Value.Replace(" ", "");
-                    transactionAmountIndex = restOfLine.IndexOf(firstAmountStr, StringComparison.Ordinal);
-                }
-            }
-            
-            // Extract description - handle edge cases
             string rawDescription;
-            if (transactionAmountIndex > 0)
+            
+            // Build a pattern to match: [description text] [monetary values...]
+            // The description is everything before the first monetary value
+            var firstMoneyMatch = MoneyPattern.Match(restOfLine);
+            
+            if (firstMoneyMatch.Success)
             {
-                rawDescription = restOfLine.Substring(0, transactionAmountIndex).Trim();
-            }
-            else if (transactionAmountIndex == 0)
-            {
-                // Amount is at the start - description might be empty or we need to handle differently
-                // This shouldn't happen in normal bank statements, but handle gracefully
-                rawDescription = "Transaction";
+                // Extract everything before the first monetary value
+                rawDescription = restOfLine.Substring(0, firstMoneyMatch.Index).Trim();
             }
             else
             {
-                // Fallback: use everything before the first monetary value
-                if (moneyMatches.Count > 0)
+                // Fallback: This shouldn't happen since we already found moneyMatches
+                // But be defensive - remove all monetary values from the line
+                rawDescription = restOfLine.Trim();
+                foreach (Match moneyMatch in moneyMatches)
                 {
-                    var firstMoneyIndex = restOfLine.IndexOf(moneyMatches[0].Value, StringComparison.Ordinal);
-                    rawDescription = firstMoneyIndex > 0 
-                        ? restOfLine.Substring(0, firstMoneyIndex).Trim()
-                        : "Transaction";
+                    rawDescription = rawDescription.Replace(moneyMatch.Value, "").Trim();
                 }
-                else
-                {
-                    rawDescription = restOfLine.Trim();
-                }
+                rawDescription = Regex.Replace(rawDescription, @"\s+", " ").Trim();
+            }
+            
+            // Ensure we have a description
+            if (string.IsNullOrWhiteSpace(rawDescription))
+            {
+                rawDescription = "Transaction";
             }
 
             // Extract category before cleaning description
@@ -286,12 +260,40 @@ public class RegexTransactionParser : ITransactionParser
             // Clean up description - remove trailing category words if they exist
             var description = CleanDescription(rawDescription);
 
-            // CRITICAL VALIDATION: Ensure we have a valid transaction amount
-            // This prevents missing valid transactions like "16/12/2025 Banking App External PayShap Payment: King Digital Payments -100.00 -6.00 43.56"
-            if (amount == 0)
+            // CRITICAL VALIDATION: Only skip if we have NO amount AND NO description
+            // This ensures we capture all valid transactions, even if amount is 0 (adjustments)
+            // The transaction "16/12/2025 Banking App External PayShap Payment: King Digital Payments -100.00 -6.00 43.56"
+            // should always be captured if it has an amount
+            if (amount == 0 && string.IsNullOrWhiteSpace(rawDescription))
             {
-                continue; // Skip incomplete transactions
+                // Both amount and description are missing - this is an incomplete transaction
+                continue;
             }
+            
+            // FILTER OUT INVALID TRANSACTIONS: Check for header/footer text that got parsed as transactions
+            // These typically contain patterns like "Page of", "Fee Summary", "Available Balance", etc.
+            var invalidPatterns = new[]
+            {
+                "Page of",
+                "Fee Summary",
+                "Available Balance",
+                "Tax Invoice",
+                "VAT Registration",
+                "Spending Summary",
+                "Interest, Rewards and Fees"
+            };
+            
+            bool isInvalidTransaction = invalidPatterns.Any(pattern => 
+                rawDescription.Contains(pattern, StringComparison.OrdinalIgnoreCase));
+            
+            if (isInvalidTransaction)
+            {
+                // This is header/footer text, not a real transaction - skip it
+                continue;
+            }
+            
+            // If amount is 0 but we have a description, it might be a valid transaction (e.g., adjustments, reversals)
+            // If amount is non-zero, we definitely have a valid transaction regardless of description
 
             // Determine transaction type
             var transactionType = DetermineTransactionType(amount, description);
@@ -309,10 +311,16 @@ public class RegexTransactionParser : ITransactionParser
                 // Capitec Bank is South African, use ZAR currency
                 results.Add(new Transaction(parsedDate, description, amount, balance, "ZAR", category, fee, transactionType));
             }
+            catch (FormatException)
+            {
+                // Date parsing failed - skip this line
+                // This could happen if the date format is unexpected
+                continue;
+            }
             catch (Exception)
             {
-                // Skip lines with invalid dates or parsing errors
-                // In production, consider logging these for debugging
+                // Other parsing errors - skip this line but log for debugging
+                // This should rarely happen, but we want to be defensive
                 continue;
             }
         }
