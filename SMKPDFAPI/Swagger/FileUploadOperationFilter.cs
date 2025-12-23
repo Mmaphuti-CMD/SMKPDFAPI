@@ -16,10 +16,7 @@ public class FileUploadOperationFilter : IOperationFilter
 
         if (fileParameters.Any())
         {
-            // Clear existing parameters
             operation.Parameters = new List<OpenApiParameter>();
-            
-            // Add proper multipart/form-data request body
             operation.RequestBody = new OpenApiRequestBody
             {
                 Required = true,
