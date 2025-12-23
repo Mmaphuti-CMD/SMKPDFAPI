@@ -22,16 +22,80 @@ public class RegexTransactionParser : ITransactionParser
     private static readonly Regex MoneyPattern = new(
         @"-?(?:\d{1,3}(?:\s+\d{3})*|\d+)\.\d{2}",
         RegexOptions.Compiled);
+    
+    // Pattern to detect page markers (___PAGE_X___)
+    // Match if line starts with page marker (even if there's more content after it)
+    // This handles cases where PDFs don't have proper line breaks
+    private static readonly Regex PageMarkerPattern = new(
+        @"^___PAGE_(\d+)___",
+        RegexOptions.Compiled);
+    
+    // Pattern to check if line is ONLY a page marker (no other content)
+    private static readonly Regex PageMarkerOnlyPattern = new(
+        @"^___PAGE_\d+___\s*$",
+        RegexOptions.Compiled);
+    
+    // Pattern to detect "Page X of Y" text in statements
+    private static readonly Regex PageOfPattern = new(
+        @"Page\s+(\d+)\s+of\s+\d+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public List<Transaction> Parse(StatementText text)
     {
         var results = new List<Transaction>();
         var inTransactionHistory = false;
         var foundHeader = false;
+        int? currentPageNumber = null; // Start with null - will be set when we find page info
 
         for (int i = 0; i < text.Lines.Count; i++)
         {
             var line = text.Lines[i];
+
+            // PAGE TRACKING: Check for page markers (___PAGE_X___)
+            // Handle two cases:
+            // 1. Line is ONLY a page marker: extract page number and skip the line
+            // 2. Line STARTS with a page marker but has more content: extract page number and process the rest
+            var pageMarkerMatch = PageMarkerPattern.Match(line);
+            if (pageMarkerMatch.Success)
+            {
+                // Update current page number from marker
+                if (int.TryParse(pageMarkerMatch.Groups[1].Value, out int pageFromMarker))
+                {
+                    currentPageNumber = pageFromMarker;
+                }
+                
+                // Check if line is ONLY a page marker (no other content)
+                if (PageMarkerOnlyPattern.IsMatch(line))
+                {
+                    continue; // Skip the marker line itself
+                }
+                
+                // Line has page marker + other content - remove the marker and continue processing
+                // Remove the page marker from the beginning of the line
+                line = line.Substring(pageMarkerMatch.Length).TrimStart();
+                
+                // If line is now empty after removing marker, skip it
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+                
+                // Continue processing the line (it might be a transaction or other content)
+            }
+            
+            // PAGE TRACKING: Check for "Page X of Y" pattern in the text
+            // This is a hybrid approach - we use both PDF structure markers and text patterns
+            var pageOfMatch = PageOfPattern.Match(line);
+            if (pageOfMatch.Success)
+            {
+                // Update current page number from "Page X of Y" text
+                if (int.TryParse(pageOfMatch.Groups[1].Value, out int pageFromText))
+                {
+                    currentPageNumber = pageFromText;
+                }
+                // Don't skip the line - it might contain other useful info
+                // But we'll skip it later if it doesn't match transaction patterns
+            }
 
             // Check if we're entering the transaction history section
             if (line.Contains("Transaction History", StringComparison.OrdinalIgnoreCase))
@@ -260,6 +324,33 @@ public class RegexTransactionParser : ITransactionParser
             // Clean up description - remove trailing category words if they exist
             var description = CleanDescription(rawDescription);
 
+            // SPECIAL CASE: Fee transactions with only 2 monetary values
+            // When a transaction IS a fee (category = "Fees" AND amount is negative),
+            // and there are only 2 values (amount + balance), the amount itself represents the fee
+            // Examples:
+            // "23/11/2025 SMS Payment Notification Fee Fees -0.35 91.69" → fee = 0.35
+            // "30/11/2025 Monthly Account Admin Fee Fees -7.50 62.35" → fee = 7.50
+            // "02/12/2025 International Online Purchase Insufficient Funds Fee: ... Fees -2.00 60.06" → fee = 2.00
+            // 
+            // IMPORTANT: Don't confuse refunds (credits) with fees (debits)
+            // "18/11/2025 Adjustment: Refund For Incorrect Decline Fee Other Income 4.00 45.04" → NOT a fee (it's a refund/credit)
+            if (fee == null && moneyMatches.Count == 2)
+            {
+                // A fee transaction must:
+                // 1. Have category = "Fees" (not just description containing "Fee")
+                // 2. Have negative amount (fees are debits, not credits)
+                bool isFeeTransaction = 
+                    category != null && 
+                    category.Equals("Fees", StringComparison.OrdinalIgnoreCase) &&
+                    amount < 0; // Fees are always negative (debits)
+                
+                if (isFeeTransaction)
+                {
+                    // The amount itself represents the fee
+                    fee = Math.Abs(amount);
+                }
+            }
+
             // CRITICAL VALIDATION: Only skip if we have NO amount AND NO description
             // This ensures we capture all valid transactions, even if amount is 0 (adjustments)
             // The transaction "16/12/2025 Banking App External PayShap Payment: King Digital Payments -100.00 -6.00 43.56"
@@ -309,7 +400,8 @@ public class RegexTransactionParser : ITransactionParser
                 }
                 
                 // Capitec Bank is South African, use ZAR currency
-                results.Add(new Transaction(parsedDate, description, amount, balance, "ZAR", category, fee, transactionType));
+                // Use currentPageNumber (may be null if no page info found)
+                results.Add(new Transaction(parsedDate, description, amount, balance, "ZAR", category, fee, transactionType, null, false, null, currentPageNumber));
             }
             catch (FormatException)
             {

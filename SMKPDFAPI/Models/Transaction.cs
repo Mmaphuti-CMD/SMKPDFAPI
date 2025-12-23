@@ -11,5 +11,6 @@ public record Transaction(
     string TransactionType = "Unknown", // "Credit", "Debit", "Transfer", "Unknown"
     string? TransactionHash = null, // Unique hash/ID for duplicate detection
     bool IsDuplicate = false, // Flag indicating if this is a duplicate
-    string? OriginalTransactionHash = null); // Hash of the original transaction if this is a duplicate
+    string? OriginalTransactionHash = null, // Hash of the original transaction if this is a duplicate
+    int? PageNumber = null); // Page number where this transaction appears (e.g., 1, 2, 3...)
 

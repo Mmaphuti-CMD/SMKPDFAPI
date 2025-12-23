@@ -14,16 +14,26 @@ public class SimpleStatementNormalizer : IStatementNormalizer
             .Split('\n')
             .Select(l => Regex.Replace(l, @"\s{2,}", " ").Trim())
             .Where(l => !string.IsNullOrWhiteSpace(l))
-            .Where(l => !Regex.IsMatch(l, @"^Page\s+\d+\s+of\s+\d+$", RegexOptions.IgnoreCase))
+            // Keep page markers (___PAGE_X___) but filter out standalone "Page X of Y" lines
+            // IMPORTANT: Page markers must be preserved for page tracking
+            .Where(l => l.StartsWith("___PAGE_", StringComparison.Ordinal) || !Regex.IsMatch(l, @"^Page\s+\d+\s+of\s+\d+$", RegexOptions.IgnoreCase))
             .ToList();
 
         // If we only got 1-2 lines, the PDF might not have proper line breaks
         // Try to split by date patterns (DD/MM/YYYY) to break up transactions
+        // IMPORTANT: Preserve page markers (___PAGE_X___) - they must remain as separate lines
         if (lines.Count <= 2)
         {
             var splitLines = new List<string>();
             foreach (var line in lines)
             {
+                // Preserve page markers as-is - don't split them
+                if (line.StartsWith("___PAGE_", StringComparison.Ordinal))
+                {
+                    splitLines.Add(line);
+                    continue;
+                }
+                
                 // Check if this line contains "Transaction History" - this is where transactions start
                 var transactionHistoryIndex = line.IndexOf("Transaction History", StringComparison.OrdinalIgnoreCase);
                 if (transactionHistoryIndex >= 0)
@@ -69,7 +79,8 @@ public class SimpleStatementNormalizer : IStatementNormalizer
                     splitLines.AddRange(dateSplitLines);
                 }
             }
-            lines = splitLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+            // Preserve page markers when filtering
+            lines = splitLines.Where(l => !string.IsNullOrWhiteSpace(l) || l.StartsWith("___PAGE_", StringComparison.Ordinal)).ToList();
         }
 
         return new StatementText(lines);

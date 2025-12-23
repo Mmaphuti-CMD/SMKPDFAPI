@@ -26,8 +26,15 @@ public class PdfPigTextExtractor : IPdfTextExtractor
         using var document = PdfDocument.Open(pdfStream);
         foreach (var page in document.GetPages())
         {
-            builder.AppendLine(page.Text);
             pageCount++;
+            // DISABLED: PDF structure page markers (___PAGE_X___)
+            // Using only "Page X of Y" text pattern detection instead
+            // This avoids interference with transaction parsing
+            // if (pageCount > 1)
+            // {
+            //     builder.AppendLine($"___PAGE_{pageCount}___");
+            // }
+            builder.AppendLine(page.Text);
         }
 
         return Task.FromResult(new PdfExtractionResult(builder.ToString(), pageCount));
