@@ -6,9 +6,8 @@ public record AccountInfo(
     string? AccountType = null,
     decimal? OpeningBalance = null,
     decimal? ClosingBalance = null,
-    decimal? TotalCredits = null,
-    decimal? TotalDebits = null,
-    decimal? TotalFees = null,
-    decimal? InterestEarned = null,
-    decimal? InterestCharged = null);
+    decimal TotalCredits = 0,
+    decimal TotalDebits = 0,
+    decimal? TotalInterestEarned = null,
+    decimal? TotalInterestCharged = null);
 
